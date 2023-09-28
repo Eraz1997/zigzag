@@ -5,11 +5,10 @@ const GeneralPurposeAllocator = std.heap.GeneralPurposeAllocator(.{});
 const Logger = std.log.scoped(.server);
 
 pub const App = struct {
-    address: []const u8,
-    gpa: GeneralPurposeAllocator,
     allocator: std.mem.Allocator,
-    port: u16,
+    gpa: GeneralPurposeAllocator,
     server: std.http.Server,
+    settings: settings.Settings,
     should_quit: bool = false,
 
     pub fn init(app_settings: settings.Settings) App {
@@ -20,17 +19,17 @@ pub const App = struct {
 
         var server = std.http.Server.init(allocator, .{ .reuse_address = true });
 
-        return App{ .address = app_settings.address, .allocator = allocator, .gpa = gpa, .port = app_settings.port, .server = server };
+        return App{ .allocator = allocator, .gpa = gpa, .server = server, .settings = app_settings };
     }
 
     pub fn run(self: *App) !void {
         defer std.debug.assert(self.gpa.deinit() == .ok);
         defer self.server.deinit();
 
-        const address = std.net.Address.parseIp(self.address, self.port) catch unreachable;
+        const address = std.net.Address.parseIp(self.settings.address, self.settings.port) catch unreachable;
         try self.server.listen(address);
 
-        Logger.info("Server listening at {s}:{}", .{ self.address, self.port });
+        Logger.info("Server listening at {s}:{}", .{ self.settings.address, self.settings.port });
 
         while (true) {
             var response = try self.server.accept(.{ .allocator = self.allocator });
@@ -48,27 +47,44 @@ pub const App = struct {
                     },
                 };
 
-                handle_request(&response, self.allocator) catch |err| {
-                    Logger.err("{}", .{err});
-                };
-
-                Logger.info("{s} {s} {s}", .{ @tagName(response.request.method), @tagName(response.request.version), response.request.target });
+                const thread = try std.Thread.spawn(.{ .allocator = self.allocator }, handle_request, .{
+                    &response,
+                    self.allocator,
+                    self.settings.max_body_size,
+                });
+                thread.join();
             }
         }
     }
 };
 
-fn handle_request(
-    response: *std.http.Server.Response,
-    allocator: std.mem.Allocator,
-) !void {
-    const body = try response.reader().readAllAlloc(allocator, 8192);
+fn handle_request(response: *std.http.Server.Response, allocator: std.mem.Allocator, max_body_size: usize) void {
+    const body = response.reader().readAllAlloc(allocator, max_body_size) catch |err| {
+        Logger.err("Cannot allocate space for body: {}", .{err});
+        response.status = .internal_server_error;
+        log_response_info(response);
+        return;
+    };
     defer allocator.free(body);
 
     if (response.request.headers.contains("connection")) {
-        try response.headers.append("connection", "keep-alive");
+        response.headers.append("connection", "keep-alive") catch |err| {
+            Logger.err("Cannot set 'connection' header: {}", .{err});
+        };
     }
 
+    example_router(response) catch |err| {
+        Logger.err("{}", .{err});
+    };
+
+    log_response_info(response);
+}
+
+fn log_response_info(response: *std.http.Server.Response) void {
+    Logger.info("{s} {s} {s} - {}", .{ @tagName(response.request.method), @tagName(response.request.version), response.request.target, @intFromEnum(response.status) });
+}
+
+fn example_router(response: *std.http.Server.Response) !void {
     if (std.mem.startsWith(u8, response.request.target, "/test") and response.request.method == .GET) {
         try response.headers.append("content-type", "text/plain");
         response.status = .ok;

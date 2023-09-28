@@ -5,7 +5,7 @@ const GeneralPurposeAllocator = std.heap.GeneralPurposeAllocator(.{});
 const Logger = std.log.scoped(.server);
 
 pub const App = struct {
-    address: []const u8 = "127.0.0.1",
+    address: []const u8,
     gpa: GeneralPurposeAllocator,
     allocator: std.mem.Allocator,
     port: u16,
@@ -20,7 +20,7 @@ pub const App = struct {
 
         var server = std.http.Server.init(allocator, .{ .reuse_address = true });
 
-        return App{ .allocator = allocator, .gpa = gpa, .port = app_settings.port, .server = server };
+        return App{ .address = app_settings.address, .allocator = allocator, .gpa = gpa, .port = app_settings.port, .server = server };
     }
 
     pub fn run(self: *App) !void {

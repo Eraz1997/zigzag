@@ -1,10 +1,8 @@
 const std = @import("std");
-
-const settings = @import("./settings.zig");
-const app = @import("./app.zig");
+const zigzag = @import("zigzag");
 
 pub fn main() !void {
-    const app_settings = settings.Settings{};
-    var app_instance = app.App.init(app_settings);
-    try app_instance.run();
+    const settings = zigzag.Settings{ .address = "0.0.0.0", .port = 8000 };
+    var app = zigzag.App.init(app_settings);
+    try app.run();
 }

@@ -1,8 +1,9 @@
 const std = @import("std");
 const settings = @import("./settings.zig");
+const logging = @import("./logging.zig");
+const router = @import("./router.zig");
 
 const GeneralPurposeAllocator = std.heap.GeneralPurposeAllocator(.{});
-const Logger = std.log.scoped(.server);
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -10,29 +11,46 @@ pub const App = struct {
     server: std.http.Server,
     settings: settings.Settings,
     should_quit: bool = false,
+    routers: std.ArrayList(*router.Router),
 
     pub fn init(app_settings: settings.Settings) App {
-        Logger.info("Starting HTTP/1.1 server...", .{});
+        logging.Logger.info("Starting HTTP/1.1 server...", .{});
 
         var gpa = GeneralPurposeAllocator{};
         const allocator = gpa.allocator();
 
         var server = std.http.Server.init(allocator, .{ .reuse_address = true });
 
-        return App{ .allocator = allocator, .gpa = gpa, .server = server, .settings = app_settings };
+        return App{ .allocator = allocator, .gpa = gpa, .server = server, .settings = app_settings, .routers = std.ArrayList(*router.Router).init(allocator) };
     }
 
-    pub fn run(self: *App) !void {
+    pub fn add_router(self: *App, app_router: *router.Router) void {
+        try self.routers.append(app_router) catch |err| {
+            logging.Logger.err("Cannot register router with prefix {}: {}", .{ app_router.prefix, err });
+        };
+    }
+
+    pub fn run(self: *App) void {
         defer std.debug.assert(self.gpa.deinit() == .ok);
         defer self.server.deinit();
+        defer for (self.routers.items) |app_router| {
+            app_router.deinit();
+        };
+        defer self.routers.deinit();
 
         const address = std.net.Address.parseIp(self.settings.address, self.settings.port) catch unreachable;
-        try self.server.listen(address);
+        self.server.listen(address) catch |err| {
+            logging.Logger.err("Cannot listen at {s}:{}: {}", .{ self.settings.address, self.settings.port, err });
+            return;
+        };
 
-        Logger.info("Server listening at {s}:{}", .{ self.settings.address, self.settings.port });
+        logging.Logger.info("Server listening at {s}:{}", .{ self.settings.address, self.settings.port });
 
         while (true) {
-            var response = try self.server.accept(.{ .allocator = self.allocator });
+            var response = self.server.accept(.{ .allocator = self.allocator }) catch |err| {
+                logging.Logger.err("Cannot accept response: {}", .{err});
+                continue;
+            };
             defer response.deinit();
 
             while (response.reset() != .closing) {
@@ -40,27 +58,31 @@ pub const App = struct {
                     error.HttpHeadersInvalid => break,
                     error.EndOfStream => continue,
                     else => {
-                        Logger.err("{}", .{err});
+                        logging.Logger.err("{}", .{err});
                         if (@errorReturnTrace()) |trace| {
                             std.debug.dumpStackTrace(trace.*);
                         }
                     },
                 };
 
-                const thread = try std.Thread.spawn(.{ .allocator = self.allocator }, handle_request, .{
+                const thread = std.Thread.spawn(.{ .allocator = self.allocator }, handle_request, .{
+                    self,
                     &response,
                     self.allocator,
                     self.settings.max_body_size,
-                });
+                }) catch |err| {
+                    logging.Logger.err("Cannot spawn thread: {}", .{err});
+                    break;
+                };
                 thread.join();
             }
         }
     }
 };
 
-fn handle_request(response: *std.http.Server.Response, allocator: std.mem.Allocator, max_body_size: usize) void {
+fn handle_request(app: *App, response: *std.http.Server.Response, allocator: std.mem.Allocator, max_body_size: usize) void {
     const body = response.reader().readAllAlloc(allocator, max_body_size) catch |err| {
-        Logger.err("Cannot allocate space for body: {}", .{err});
+        logging.Logger.err("Cannot allocate space for body: {}", .{err});
         response.status = .internal_server_error;
         log_response_info(response);
         return;
@@ -69,33 +91,39 @@ fn handle_request(response: *std.http.Server.Response, allocator: std.mem.Alloca
 
     if (response.request.headers.contains("connection")) {
         response.headers.append("connection", "keep-alive") catch |err| {
-            Logger.err("Cannot set 'connection' header: {}", .{err});
+            logging.Logger.err("Cannot set 'connection' header: {}", .{err});
         };
     }
 
-    example_router(response) catch |err| {
-        Logger.err("{}", .{err});
-    };
+    for (app.routers.items) |app_router| {
+        const endpoint_handler = app_router.get_endpoint_handler(response.request.target) catch |err| {
+            switch (err) {
+                router.RouterError.EndpointHandlerNotFound => continue,
+            }
+        };
+        endpoint_handler(response) catch |err| {
+            response.status = .internal_server_error;
+            logging.Logger.err("{}", .{err});
+            response.do() catch |err1| {
+                logging.Logger.err("Could not start response: {}", .{err1});
+            };
+            response.finish() catch |err1| {
+                logging.Logger.err("Could not flush response: {}", .{err1});
+            };
+        };
+        log_response_info(response);
+        return;
+    }
 
-    log_response_info(response);
+    response.status = .not_found;
+    response.do() catch |err| {
+        logging.Logger.err("Could not start response: {}", .{err});
+    };
+    response.finish() catch |err| {
+        logging.Logger.err("Could not flush response: {}", .{err});
+    };
 }
 
 fn log_response_info(response: *std.http.Server.Response) void {
-    Logger.info("{s} {s} {s} - {}", .{ @tagName(response.request.method), @tagName(response.request.version), response.request.target, @intFromEnum(response.status) });
-}
-
-fn example_router(response: *std.http.Server.Response) !void {
-    if (std.mem.startsWith(u8, response.request.target, "/test") and response.request.method == .GET) {
-        try response.headers.append("content-type", "text/plain");
-        response.status = .ok;
-        response.transfer_encoding = .{ .content_length = 14 };
-        try response.do();
-        try response.writeAll("Hello, ");
-        try response.writeAll("World!\n");
-        try response.finish();
-    } else {
-        try response.headers.append("content-type", "text/plain");
-        response.status = .not_found;
-        try response.do();
-    }
+    logging.Logger.info("{s} {s} {s} - {}", .{ @tagName(response.request.method), @tagName(response.request.version), response.request.target, @intFromEnum(response.status) });
 }

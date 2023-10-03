@@ -2,7 +2,7 @@ const std = @import("std");
 const zigzag = @import("zigzag");
 
 pub fn main() !void {
-    const settings = zigzag.Settings{ .address = "0.0.0.0", .port = 8000 };
+    const settings = zigzag.Settings{ .address = "127.0.0.1", .port = 8080 };
     var app = zigzag.App.init(settings);
-    try app.run();
+    app.run();
 }

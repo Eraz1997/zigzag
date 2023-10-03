@@ -2,6 +2,8 @@ const std = @import("std");
 const settings = @import("./settings.zig");
 const logging = @import("./logging.zig");
 const router = @import("./router.zig");
+const errors = @import("./errors.zig");
+const error_handlers = @import("./error_handlers.zig");
 
 const GeneralPurposeAllocator = std.heap.GeneralPurposeAllocator(.{});
 
@@ -12,6 +14,7 @@ pub const App = struct {
     settings: settings.Settings,
     should_quit: bool = false,
     routers: std.ArrayList(*router.Router),
+    error_handlers: std.AutoHashMap(anyerror, error_handlers.ErrorHandler),
 
     pub fn init(app_settings: settings.Settings) App {
         logging.Logger.info("Starting HTTP/1.1 server...", .{});
@@ -21,12 +24,33 @@ pub const App = struct {
 
         var server = std.http.Server.init(allocator, .{ .reuse_address = true });
 
-        return App{ .allocator = allocator, .gpa = gpa, .server = server, .settings = app_settings, .routers = std.ArrayList(*router.Router).init(allocator) };
+        var default_error_handlers = std.AutoHashMap(anyerror, error_handlers.ErrorHandler).init(allocator);
+        default_error_handlers.put(errors.ZigZagError.NotFound, error_handlers.handle_not_found) catch |err| {
+            logging.Logger.err("Cannot register default error handler: {}", .{err});
+        };
+        default_error_handlers.put(errors.ZigZagError.InternalError, error_handlers.handle_internal_error) catch |err| {
+            logging.Logger.err("Cannot register default error handler: {}", .{err});
+        };
+
+        return App{
+            .allocator = allocator,
+            .gpa = gpa,
+            .server = server,
+            .settings = app_settings,
+            .routers = std.ArrayList(*router.Router).init(allocator),
+            .error_handlers = default_error_handlers,
+        };
     }
 
     pub fn add_router(self: *App, app_router: *router.Router) void {
         try self.routers.append(app_router) catch |err| {
             logging.Logger.err("Cannot register router with prefix {}: {}", .{ app_router.prefix, err });
+        };
+    }
+
+    pub fn add_error_handler(self: *App, err: anyerror, handler: error_handlers.ErrorHandler) void {
+        try self.error_handlers.put(err, handler) catch |insertion_error| {
+            logging.Logger.err("Could not register error handler for {}: {}", .{ err, insertion_error });
         };
     }
 
@@ -95,33 +119,29 @@ fn handle_request(app: *App, response: *std.http.Server.Response, allocator: std
         };
     }
 
+    execute_endpoint_handler(app, response) catch |err| {
+        const error_handler = app.error_handlers.get(err) orelse app.error_handlers.get(errors.ZigZagError.InternalError) orelse return {
+            logging.Logger.err("Cannot error handler for {}", .{err});
+        };
+        error_handler(response) catch |unexpected_error| {
+            logging.Logger.err("Unexpected error while handling managed error: {}", .{unexpected_error});
+        };
+    };
+}
+
+fn execute_endpoint_handler(app: *App, response: *std.http.Server.Response) !void {
     for (app.routers.items) |app_router| {
         const endpoint_handler = app_router.get_endpoint_handler(response.request.target) catch |err| {
             switch (err) {
                 router.RouterError.EndpointHandlerNotFound => continue,
             }
         };
-        endpoint_handler(response) catch |err| {
-            response.status = .internal_server_error;
-            logging.Logger.err("{}", .{err});
-            response.do() catch |err1| {
-                logging.Logger.err("Could not start response: {}", .{err1});
-            };
-            response.finish() catch |err1| {
-                logging.Logger.err("Could not flush response: {}", .{err1});
-            };
-        };
+        try endpoint_handler(response);
         log_response_info(response);
         return;
     }
 
-    response.status = .not_found;
-    response.do() catch |err| {
-        logging.Logger.err("Could not start response: {}", .{err});
-    };
-    response.finish() catch |err| {
-        logging.Logger.err("Could not flush response: {}", .{err});
-    };
+    return errors.ZigZagError.NotFound;
 }
 
 fn log_response_info(response: *std.http.Server.Response) void {

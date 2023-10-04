@@ -31,6 +31,10 @@ pub const Router = struct {
             return RouterError.EndpointHandlerNotFound;
         }
         const path_without_prefix = path[self.prefix.len..];
+        const path_prefix = path[0..self.prefix.len];
+        if (!std.mem.eql(u8, path_prefix, self.prefix)) {
+            return RouterError.EndpointHandlerNotFound;
+        }
         return self.endpoint_handlers.get(path_without_prefix) orelse return RouterError.EndpointHandlerNotFound;
     }
 

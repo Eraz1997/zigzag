@@ -1,4 +1,4 @@
-pub const ZigZagError = error{
+pub const Error = error{
     NotFound,
     InternalError,
 };

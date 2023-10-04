@@ -25,10 +25,10 @@ pub const App = struct {
         var server = std.http.Server.init(allocator, .{ .reuse_address = true });
 
         var default_error_handlers = std.AutoHashMap(anyerror, error_handlers.ErrorHandler).init(allocator);
-        default_error_handlers.put(errors.ZigZagError.NotFound, error_handlers.handle_not_found) catch |err| {
+        default_error_handlers.put(errors.Error.NotFound, error_handlers.handle_not_found) catch |err| {
             logging.Logger.err("Cannot register default error handler: {}", .{err});
         };
-        default_error_handlers.put(errors.ZigZagError.InternalError, error_handlers.handle_internal_error) catch |err| {
+        default_error_handlers.put(errors.Error.InternalError, error_handlers.handle_internal_error) catch |err| {
             logging.Logger.err("Cannot register default error handler: {}", .{err});
         };
 
@@ -120,7 +120,7 @@ fn handle_request(app: *App, response: *std.http.Server.Response, allocator: std
     }
 
     execute_endpoint_handler(app, response) catch |err| {
-        const error_handler = app.error_handlers.get(err) orelse app.error_handlers.get(errors.ZigZagError.InternalError) orelse return {
+        const error_handler = app.error_handlers.get(err) orelse app.error_handlers.get(errors.Error.InternalError) orelse return {
             logging.Logger.err("Cannot error handler for {}", .{err});
         };
         error_handler(response) catch |unexpected_error| {
@@ -141,7 +141,7 @@ fn execute_endpoint_handler(app: *App, response: *std.http.Server.Response) !voi
         return;
     }
 
-    return errors.ZigZagError.NotFound;
+    return errors.Error.NotFound;
 }
 
 fn log_response_info(response: *std.http.Server.Response) void {

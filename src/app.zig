@@ -4,22 +4,20 @@ const logging = @import("./logging.zig");
 const router = @import("./router.zig");
 const errors = @import("./errors.zig");
 const error_handlers = @import("./error_handlers.zig");
-
-const GeneralPurposeAllocator = std.heap.GeneralPurposeAllocator(.{});
+const memory = @import("./memory.zig");
+const thread_pool = @import("./thread_pool.zig");
 
 pub const App = struct {
     allocator: std.mem.Allocator,
-    gpa: GeneralPurposeAllocator,
+    gpa: memory.GeneralPurposeAllocator,
     server: std.http.Server,
     settings: settings.Settings,
-    should_quit: bool = false,
     routers: std.ArrayList(*router.Router),
     error_handlers: std.AutoHashMap(anyerror, error_handlers.ErrorHandler),
+    thread_pool: thread_pool.ThreadPool,
 
     pub fn init(app_settings: settings.Settings) App {
-        logging.Logger.info("Starting HTTP/1.1 server...", .{});
-
-        var gpa = GeneralPurposeAllocator{};
+        var gpa = memory.GeneralPurposeAllocator{};
         const allocator = gpa.allocator();
 
         var server = std.http.Server.init(allocator, .{ .reuse_address = true });
@@ -32,14 +30,19 @@ pub const App = struct {
             logging.Logger.err("Cannot register default error handler: {}", .{err});
         };
 
-        return App{
+        var app = App{
             .allocator = allocator,
             .gpa = gpa,
             .server = server,
             .settings = app_settings,
             .routers = std.ArrayList(*router.Router).init(allocator),
             .error_handlers = default_error_handlers,
+            .thread_pool = thread_pool.ThreadPool.init(),
         };
+
+        logging.Logger.info("App initialised.", .{});
+
+        return app;
     }
 
     pub fn add_router(self: *App, app_router: *router.Router) void {
@@ -55,12 +58,8 @@ pub const App = struct {
     }
 
     pub fn run(self: *App) void {
-        defer std.debug.assert(self.gpa.deinit() == .ok);
-        defer self.server.deinit();
-        defer for (self.routers.items) |app_router| {
-            app_router.deinit();
-        };
-        defer self.routers.deinit();
+        logging.Logger.info("Starting HTTP/1.1 server...", .{});
+        defer self.quit();
 
         const address = std.net.Address.parseIp(self.settings.address, self.settings.port) catch unreachable;
         self.server.listen(address) catch |err| {
@@ -102,6 +101,22 @@ pub const App = struct {
             }
         }
     }
+
+    fn quit(self: *App) void {
+        logging.Logger.info("Gracefully quitting the application...", .{});
+
+        std.debug.assert(self.gpa.deinit() == .ok);
+        self.server.deinit();
+        for (self.routers.items) |app_router| {
+            app_router.deinit();
+        }
+        self.routers.deinit();
+        self.thread_pool.deinit();
+
+        logging.Logger.info("App gracefully shut down.", .{});
+
+        std.os.exit(0);
+    }
 };
 
 fn handle_request(app: *App, response: *std.http.Server.Response, allocator: std.mem.Allocator, max_body_size: usize) void {
@@ -127,6 +142,7 @@ fn handle_request(app: *App, response: *std.http.Server.Response, allocator: std
             logging.Logger.err("Unexpected error while handling managed error: {}", .{unexpected_error});
         };
     };
+    log_response_info(response);
 }
 
 fn execute_endpoint_handler(app: *App, response: *std.http.Server.Response) !void {
@@ -137,7 +153,6 @@ fn execute_endpoint_handler(app: *App, response: *std.http.Server.Response) !voi
             }
         };
         try endpoint_handler(response);
-        log_response_info(response);
         return;
     }
 

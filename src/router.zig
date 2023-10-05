@@ -1,7 +1,7 @@
 const std = @import("std");
 const logging = @import("./logging.zig");
+const memory = @import("./memory.zig");
 
-const GeneralPurposeAllocator = std.heap.GeneralPurposeAllocator(.{});
 const EndpointHandler = *const fn (*std.http.Server.Response) anyerror!void;
 
 pub const RouterError = error{
@@ -10,12 +10,12 @@ pub const RouterError = error{
 
 pub const Router = struct {
     allocator: std.mem.Allocator,
-    gpa: GeneralPurposeAllocator,
+    gpa: memory.GeneralPurposeAllocator,
     prefix: []const u8 = "",
     endpoint_handlers: std.StringHashMap(EndpointHandler),
 
     pub fn init(prefix: []const u8) Router {
-        var gpa = GeneralPurposeAllocator{};
+        var gpa = memory.GeneralPurposeAllocator{};
         const allocator = gpa.allocator();
         return Router{ .allocator = allocator, .prefix = prefix, .endpoint_handlers = std.StringHashMap(EndpointHandler).init(allocator) };
     }

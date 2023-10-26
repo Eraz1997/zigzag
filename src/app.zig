@@ -74,31 +74,12 @@ pub const App = struct {
                 logging.Logger.err("Cannot accept response: {}", .{err});
                 continue;
             };
-            defer response.deinit();
 
-            while (response.reset() != .closing) {
-                response.wait() catch |err| switch (err) {
-                    error.HttpHeadersInvalid => break,
-                    error.EndOfStream => continue,
-                    else => {
-                        logging.Logger.err("{}", .{err});
-                        if (@errorReturnTrace()) |trace| {
-                            std.debug.dumpStackTrace(trace.*);
-                        }
-                    },
-                };
-
-                const thread = std.Thread.spawn(.{ .allocator = self.allocator }, handle_request, .{
-                    self,
-                    &response,
-                    self.allocator,
-                    self.settings.max_body_size,
-                }) catch |err| {
-                    logging.Logger.err("Cannot spawn thread: {}", .{err});
-                    break;
-                };
-                thread.join();
-            }
+            self.thread_pool.push_task(.{
+                .app = self,
+                .response = &response,
+                .function = handle_request,
+            });
         }
     }
 
@@ -119,30 +100,47 @@ pub const App = struct {
     }
 };
 
-fn handle_request(app: *App, response: *std.http.Server.Response, allocator: std.mem.Allocator, max_body_size: usize) void {
-    const body = response.reader().readAllAlloc(allocator, max_body_size) catch |err| {
-        logging.Logger.err("Cannot allocate space for body: {}", .{err});
-        response.status = .internal_server_error;
+fn handle_request(app: *App, response: *std.http.Server.Response) void {
+    defer response.deinit();
+
+    while (response.reset() != .closing) {
+        response.wait() catch |err| switch (err) {
+            error.HttpHeadersInvalid => {
+                logging.Logger.err("Invalid headers: {}", .{err});
+                break;
+            },
+            error.EndOfStream => continue,
+            else => {
+                logging.Logger.err("{}", .{err});
+                if (@errorReturnTrace()) |trace| {
+                    std.debug.dumpStackTrace(trace.*);
+                }
+            },
+        };
+        const body = response.reader().readAllAlloc(app.allocator, app.settings.max_body_size) catch |err| {
+            logging.Logger.err("Cannot allocate space for body: {}", .{err});
+            response.status = .internal_server_error;
+            log_response_info(response);
+            return;
+        };
+        defer app.allocator.free(body);
+
+        if (response.request.headers.contains("connection")) {
+            response.headers.append("connection", "keep-alive") catch |err| {
+                logging.Logger.err("Cannot set 'connection' header: {}", .{err});
+            };
+        }
+
+        execute_endpoint_handler(app, response) catch |err| {
+            const error_handler = app.error_handlers.get(err) orelse app.error_handlers.get(errors.Error.InternalError) orelse return {
+                logging.Logger.err("Cannot error handler for {}", .{err});
+            };
+            error_handler(response) catch |unexpected_error| {
+                logging.Logger.err("Unexpected error while handling managed error: {}", .{unexpected_error});
+            };
+        };
         log_response_info(response);
-        return;
-    };
-    defer allocator.free(body);
-
-    if (response.request.headers.contains("connection")) {
-        response.headers.append("connection", "keep-alive") catch |err| {
-            logging.Logger.err("Cannot set 'connection' header: {}", .{err});
-        };
     }
-
-    execute_endpoint_handler(app, response) catch |err| {
-        const error_handler = app.error_handlers.get(err) orelse app.error_handlers.get(errors.Error.InternalError) orelse return {
-            logging.Logger.err("Cannot error handler for {}", .{err});
-        };
-        error_handler(response) catch |unexpected_error| {
-            logging.Logger.err("Unexpected error while handling managed error: {}", .{unexpected_error});
-        };
-    };
-    log_response_info(response);
 }
 
 fn execute_endpoint_handler(app: *App, response: *std.http.Server.Response) !void {

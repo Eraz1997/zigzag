@@ -1,0 +1,12 @@
+1. [WIP] Working example with routers and error handlers
+2. Replace the current workers logic with an always-full workers set with a semaphore to block them
+3. Add support for HTTP methods
+4. Scaffold middlewares
+5. Abstraction for endpoint handlers, middlewares and error handlers to ease the integration
+    1. Retrieve headers
+    2. Retrieve body
+    3. Retrieve query params
+    4. Retrieve path params
+    5. Replace the std.http.Server.Response param with a custom struct
+    6. Return dev-friendly structs to fill the response object
+6. [blocked by zig 0.12] Make handlers async coroutines to leverage both the multithreading and the event loop benefits

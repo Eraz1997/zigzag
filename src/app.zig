@@ -12,7 +12,7 @@ pub const App = struct {
     gpa: memory.GeneralPurposeAllocator,
     server: std.http.Server,
     settings: settings.Settings,
-    routers: std.ArrayList(*router.Router),
+    routers: std.ArrayList(router.Router),
     error_handlers: std.AutoHashMap(anyerror, error_handlers.ErrorHandler),
     thread_pool: thread_pool.ThreadPool,
 
@@ -35,7 +35,7 @@ pub const App = struct {
             .gpa = gpa,
             .server = server,
             .settings = app_settings,
-            .routers = std.ArrayList(*router.Router).init(allocator),
+            .routers = std.ArrayList(router.Router).init(allocator),
             .error_handlers = default_error_handlers,
             .thread_pool = thread_pool.ThreadPool.init(),
         };
@@ -45,14 +45,14 @@ pub const App = struct {
         return app;
     }
 
-    pub fn add_router(self: *App, app_router: *router.Router) void {
-        try self.routers.append(app_router) catch |err| {
-            logging.Logger.err("Cannot register router with prefix {}: {}", .{ app_router.prefix, err });
+    pub fn add_router(self: *App, app_router: router.Router) void {
+        self.routers.append(app_router) catch |err| {
+            logging.Logger.err("Cannot register router with prefix : {}", .{err});
         };
     }
 
     pub fn add_error_handler(self: *App, err: anyerror, handler: error_handlers.ErrorHandler) void {
-        try self.error_handlers.put(err, handler) catch |insertion_error| {
+        self.error_handlers.put(err, handler) catch |insertion_error| {
             logging.Logger.err("Could not register error handler for {}: {}", .{ err, insertion_error });
         };
     }
@@ -88,7 +88,7 @@ pub const App = struct {
 
         std.debug.assert(self.gpa.deinit() == .ok);
         self.server.deinit();
-        for (self.routers.items) |app_router| {
+        for (self.routers.items) |*app_router| {
             app_router.deinit();
         }
         self.routers.deinit();
@@ -144,7 +144,7 @@ fn handle_request(app: *App, response: *std.http.Server.Response) void {
 }
 
 fn execute_endpoint_handler(app: *App, response: *std.http.Server.Response) !void {
-    for (app.routers.items) |app_router| {
+    for (app.routers.items) |*app_router| {
         const endpoint_handler = app_router.get_endpoint_handler(response.request.target) catch |err| {
             switch (err) {
                 router.RouterError.EndpointHandlerNotFound => continue,

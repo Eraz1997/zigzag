@@ -17,12 +17,12 @@ pub const Router = struct {
     pub fn init(prefix: []const u8) Router {
         var gpa = memory.GeneralPurposeAllocator{};
         const allocator = gpa.allocator();
-        return Router{ .allocator = allocator, .prefix = prefix, .endpoint_handlers = std.StringHashMap(EndpointHandler).init(allocator) };
+        return Router{ .allocator = allocator, .gpa = gpa, .prefix = prefix, .endpoint_handlers = std.StringHashMap(EndpointHandler).init(allocator) };
     }
 
     pub fn add_endpoint(self: *Router, path: []const u8, endpoint_handler: EndpointHandler) void {
-        try self.endpoint_handlers.put(path, endpoint_handler) catch |err| {
-            logging.Logger.err("Cannot register endpoint handler for path {}{}: {}", .{ self.prefix, path, err });
+        self.endpoint_handlers.put(path, endpoint_handler) catch |err| {
+            logging.Logger.err("Cannot register endpoint handler for path {s}{s}: {}", .{ self.prefix, path, err });
         };
     }
 
